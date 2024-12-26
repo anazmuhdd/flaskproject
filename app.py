@@ -1,152 +1,174 @@
 from flask import Flask, render_template, redirect, url_for, request, session, flash
-import os
+from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
-from werkzeug.utils import secure_filename
+from models.user import db, User, Job
+import os
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'
 
-# Configure upload folder and allowed extensions
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'pdf', 'docx', 'jpg', 'png'}  # Add more file types if needed
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+# Database configuration
+app.config.from_object('config.Config')
+db.init_app(app)
 
-# Function to check allowed file extensions
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# Dummy data for testing
+def create_test_data():
+    with app.app_context():
+        # Create test admin and user accounts
+        admin = User.query.filter_by(email='admin@example.com').first()
+        if not admin:
+            hashed_password = generate_password_hash("admin123", method='pbkdf2:sha256')
+            admin = User(name='Admin User', email='admin@example.com', phone='1234567890', password=hashed_password, is_admin=True)
+            db.session.add(admin)
+        
+        user = User.query.filter_by(email='user@example.com').first()
+        if not user:
+            hashed_password = generate_password_hash("user123", method='pbkdf2:sha256')
+            user = User(name='Test User', email='user@example.com', phone='0987654321', password=hashed_password, is_admin=False)
+            db.session.add(user)
 
-# Dummy user data for login validation (username: password, role)
-users = {
-    'admin': {'password': 'admin123', 'role': 'admin'},
-    'user': {'password': 'user123', 'role': 'user'}
-}
+        # Create some sample job opportunities
+        if not Job.query.first():
+            jobs = [
+                Job(job_name="Software Engineer", company_name="TechCorp", location="New York", description="Develop software solutions."),
+                Job(job_name="Data Analyst", company_name="DataTech", location="San Francisco", description="Analyze data trends."),
+            ]
+            db.session.bulk_save_objects(jobs)
 
-# Store user profile data
-user_profiles = {}
+        db.session.commit()
 
 # Decorator to ensure the user is logged in
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'username' not in session:
+        if 'user_id' not in session:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
-# Profile Data Input Route
-@app.route('/profile_input', methods=['GET', 'POST'])
-@login_required
-def profile_input():
-    username = session.get('username')
-    
-    if request.method == 'POST':
-        name = request.form.get('name')
-        email = request.form.get('email')
-        age = request.form.get('age')
-        phone = request.form.get('phone')
-
-        # Save profile data in a dictionary (mock database)
-        user_profiles[username] = {
-            'name': name,
-            'email': email,
-            'age': age,
-            'phone': phone
-        }
-        flash("Profile information saved successfully!", "success")
-        return redirect(url_for('profile_display'))
-    
-    return render_template('profile_input.html')
-
-# Profile Display Route
-@app.route('/profile_display', methods=['GET'])
-@login_required
-def profile_display():
-    username = session.get('username')
-    user_data = user_profiles.get(username, {})
-    
-    if not user_data:
-        flash("No profile data found. Please fill in your profile information first.", "info")
-        return redirect(url_for('profile_input'))
-
-    return render_template('profile_display.html', user=user_data)
-
 # Login Route
+@app.route('/login', methods=['GET', 'POST'])
+@app.route('/login', methods=['GET', 'POST'])
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form['username']
+        email = request.form['username']
         password = request.form['password']
         role = request.form['role']
 
-        # Check if the user exists and password is correct
-        if username in users and users[username]['password'] == password and users[username]['role'] == role:
-            session['username'] = username  # Save the username in session
-            session['role'] = role  # Save the role of the user
-            return redirect(url_for('user_dashboard') if role == 'user' else url_for('admin_dashboard'))
+        # Validate user credentials from the database
+        user = User.query.filter_by(email=email).first()
+        if user:
+            print(f"Found user: {user.name}, Role: {user.is_admin}")  # Debugging: Print user info
+            print(f"Stored password hash: {user.password}")  # Debugging: Print stored hashed password
+
+            if check_password_hash(user.password, password):
+                print("Password is correct.")  # Debugging: Password check successful
+                if (role == 'admin' and user.is_admin) or (role == 'user' and not user.is_admin):
+                    session['user_id'] = user.id
+                    session['username'] = user.name
+                    session['role'] = role
+                    print(f"Session set: {session['user_id']}, {session['role']}")  # Debugging: Print session data
+
+                    return redirect(url_for('admin_dashboard') if role == 'admin' else url_for('user_dashboard'))
+                else:
+                    flash("Invalid role for the user.", "error")
+            else:
+                flash("Invalid password.", "error")
         else:
-            flash("Invalid username, password, or role.", "error")
+            flash("User not found.", "error")
     
     return render_template('login.html')
 
+
 # Admin Dashboard Route
-@app.route('/admin_dashboard')
+@app.route('/admin_dashboard', methods=['GET', 'POST'])
 @login_required
 def admin_dashboard():
     if session.get('role') != 'admin':
-        return redirect(url_for('user_dashboard'))  # Redirect if the user is not admin
-    return render_template('admin_dashboard.html')
+        return redirect(url_for('user_dashboard'))
+
+    if request.method == 'POST':
+        job_id = request.form.get('job_id')
+        job_name = request.form['job_name']
+        company_name = request.form['company_name']
+        location = request.form['location']
+        description = request.form['description']
+
+        if job_id:
+            job = Job.query.get(job_id)
+            if job:
+                job.job_name = job_name
+                job.company_name = company_name
+                job.location = location
+                job.description = description
+        else:
+            new_job = Job(job_name=job_name, company_name=company_name, location=location, description=description)
+            db.session.add(new_job)
+
+        db.session.commit()
+        flash("Job saved successfully.")
+
+    jobs = Job.query.all()
+    return render_template('admin_dashboard.html', jobs=jobs)
+
+# Edit Job Route
+@app.route('/edit_job/<int:job_id>', methods=['GET', 'POST'])
+@login_required
+def edit_job(job_id):
+    if session.get('role') != 'admin':
+        return redirect(url_for('user_dashboard'))
+
+    job = Job.query.get_or_404(job_id)
+    if request.method == 'POST':
+        job.job_name = request.form['job_name']
+        job.company_name = request.form['company_name']
+        job.location = request.form['location']
+        job.description = request.form['description']
+        db.session.commit()
+        flash("Job updated successfully.")
+        return redirect(url_for('admin_dashboard'))
+
+    return render_template('edit_job.html', job=job)
+
+# Delete Job Route
+@app.route('/delete_job/<int:job_id>', methods=['POST'])
+@login_required
+def delete_job(job_id):
+    if session.get('role') != 'admin':
+        return redirect(url_for('user_dashboard'))
+
+    job = Job.query.get_or_404(job_id)
+    db.session.delete(job)
+    db.session.commit()
+    flash("Job deleted successfully.")
+    return redirect(url_for('admin_dashboard'))
 
 # User Dashboard Route
 @app.route('/user_dashboard')
 @login_required
 def user_dashboard():
     if session.get('role') != 'user':
-        return redirect(url_for('admin_dashboard'))  # Redirect if the user is not user
-    return render_template('user_dashboard.html')
+        return redirect(url_for('admin_dashboard'))
 
-# Resume & Certifications Route
-@app.route('/resume_certifications', methods=['GET', 'POST'])
-@login_required
-def resume_certifications():
-    if session.get('role') != 'user':
-        return redirect(url_for('admin_dashboard'))  # Redirect if the user is not a user
-
-    if request.method == 'POST':
-        if 'resume' not in request.files:
-            flash('No file part', 'error')
-            return render_template('resume_certifications.html')
-
-        resume = request.files['resume']
-        certification = request.files['certification']
-
-        if resume.filename == '':
-            flash('No selected file for resume', 'error')
-            return render_template('resume_certifications.html')
-
-        if resume and allowed_file(resume.filename):
-            resume_filename = secure_filename(resume.filename)
-            resume.save(os.path.join(app.config['UPLOAD_FOLDER'], 'resume_' + session['username'] + '.' + resume_filename.rsplit('.', 1)[1].lower()))
-            flash('Resume uploaded successfully!', 'success')
-        else:
-            flash('Invalid resume file type', 'error')
-            return render_template('resume_certifications.html')
-
-        if certification and certification.filename != '' and allowed_file(certification.filename):
-            cert_filename = secure_filename(certification.filename)
-            certification.save(os.path.join(app.config['UPLOAD_FOLDER'], 'certification_' + session['username'] + '.' + cert_filename.rsplit('.', 1)[1].lower()))
-            flash('Certification uploaded successfully!', 'success')
-
-        return redirect(url_for('user_dashboard'))
-
-    return render_template('resume_certifications.html')
+    jobs = Job.query.all()
+    return render_template('user_dashboard.html', jobs=jobs)
 
 # Logout Route
 @app.route('/logout')
 def logout():
-    session.pop('username', None)
-    session.pop('role', None)
+    session.clear()
     flash("You have been logged out.", "info")
     return redirect(url_for('login'))
 
+# Initialize and create tables on app startup
 if __name__ == "__main__":
-    app.run(debug=True)
+    try:
+        with app.app_context():
+            db.create_all()
+            create_test_data()
+            print("Tables created successfully.")
+    except Exception as e:
+        print(f"Error creating tables: {e}")
+
+    app.run(debug=False, use_reloader=False)
